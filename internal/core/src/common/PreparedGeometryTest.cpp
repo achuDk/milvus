@@ -10,9 +10,10 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include <gtest/gtest.h>
-#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <set>
 #include <string>
@@ -253,8 +254,11 @@ TEST(ThreadLocalGEOSContextTest, DifferentThreadsGetDifferentContexts) {
 
     constexpr int num_threads = 4;
     // Use a barrier to ensure all threads are alive simultaneously,
-    // preventing thread-local storage address reuse.
+    // preventing OS thread-id reuse that would cause thread_local
+    // storage to return the same pointer.
     std::atomic<int> ready_count{0};
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
 
     auto worker = [&]() {
         GEOSContextHandle_t ctx = GetThreadLocalGEOSContext();
@@ -268,11 +272,14 @@ TEST(ThreadLocalGEOSContextTest, DifferentThreadsGetDifferentContexts) {
             contexts.insert(ctx);
         }
 
-        // Signal ready and wait for all threads to reach this point
+        // Signal ready and wait for all threads to arrive
         ready_count.fetch_add(1);
-        while (ready_count.load() < num_threads) {
-            std::this_thread::yield();
+        {
+            std::unique_lock<std::mutex> lock(barrier_mutex);
+            barrier_cv.wait(lock,
+                            [&] { return ready_count.load() >= num_threads; });
         }
+        barrier_cv.notify_all();
     };
 
     std::vector<std::thread> threads;
