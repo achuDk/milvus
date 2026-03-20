@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <optional>
@@ -518,9 +519,40 @@ class LikePatternMatcher {
                     return pos == str_byte_len;
                 }
             } else if (is_last && !trailing_wildcard_) {
-                // Last segment must match at end
-                size_t search_pos = pos;
+                // Last segment must match at end of string.
+                // Fast path: no underscores — just compare the tail bytes
+                // directly instead of scanning forward from pos.
+                if (seg.underscore_count == 0) {
+                    if (str_byte_len < pos + seg.text.size()) {
+                        return false;
+                    }
+                    size_t tail_start = str_byte_len - seg.text.size();
+                    if (tail_start < pos) {
+                        return false;
+                    }
+                    // Validate that tail_start sits on a UTF-8 character
+                    // boundary by walking from pos.
+                    if (tail_start > pos) {
+                        size_t vp = pos;
+                        while (vp < tail_start) {
+                            size_t step = Utf8WildcardCharByteLen(
+                                str.data() + vp, str_byte_len - vp);
+                            if (step == 0) {
+                                return false;
+                            }
+                            vp += step;
+                        }
+                        if (vp != tail_start) {
+                            return false;  // Not on a char boundary
+                        }
+                    }
+                    return std::memcmp(str.data() + tail_start,
+                                       seg.text.data(),
+                                       seg.text.size()) == 0;
+                }
 
+                // Slow path: has underscores, scan forward
+                size_t search_pos = pos;
                 while (search_pos < str_byte_len) {
                     auto bytes_matched = SegmentMatchesAt(seg, str, search_pos);
                     if (bytes_matched.has_value() &&
